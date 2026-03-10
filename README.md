@@ -274,13 +274,21 @@ You can edit the dataset paths in [`datasets/sunrgbd.py`](datasets/sunrgbd.py#L3
 Once you have the datasets prepared, you can test pretrained models as
 
 ```
-python main.py --dataset_name <dataset_name> --nqueries <number of queries> --test_ckpt <path_to_checkpoint> --test_only [--enc_type masked]
+python main.py --dataset_name <dataset_name> --nqueries <number of queries> --test_ckpt <path_to_checkpoint> --test_only [--enc_type masked] [--display_bounding_boxes]
 ```
 
 We use 128 queries for the SUN RGB-D dataset and 256 queries for the ScanNet dataset.
 You will need to add the flag `--enc_type masked` when testing the 3DETR-m checkpoints.
 Please note that the testing process is stochastic (due to randomness in point cloud sampling and sampling the queries) and so results can vary within 1% AP25 across runs.
 This stochastic nature of the inference process is also common for methods such as VoteNet.
+
+To visualize predicted 3D bounding boxes in an Open3D window during testing, add `--display_bounding_boxes`.
+When this flag is enabled, each test batch displays the first sample point cloud with post-NMS predicted boxes.
+Install Open3D first with:
+
+```
+pip install open3d
+```
 
 If you have not edited the dataset paths for the files in the `datasets` folder, you can pass the path to the datasets using the `--dataset_root_dir` flag.
 

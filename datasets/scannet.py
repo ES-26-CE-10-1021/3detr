@@ -20,8 +20,8 @@ from utils.random_cuboid import RandomCuboid
 
 IGNORE_LABEL = -100
 MEAN_COLOR_RGB = np.array([109.8, 97.2, 83.8])
-DATASET_ROOT_DIR = ""  ## Replace with path to dataset
-DATASET_METADATA_DIR = "" ## Replace with path to dataset
+DATASET_ROOT_DIR = "/home/andreas/3D-Perception/votenet/scannet/scannet_train_detection_data"  ## Replace with path to dataset
+DATASET_METADATA_DIR = "/home/andreas/3D-Perception/votenet/scannet/meta_data" ## Replace with path to dataset
 
 
 class ScannetDatasetConfig(object):

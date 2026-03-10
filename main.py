@@ -130,6 +130,7 @@ def make_args_parser():
     ##### Testing #####
     parser.add_argument("--test_only", default=False, action="store_true")
     parser.add_argument("--test_ckpt", default=None, type=str)
+    parser.add_argument("--display_bounding_boxes", default=False, action="store_true")
 
     ##### I/O #####
     parser.add_argument("--checkpoint_dir", default=None, type=str)
