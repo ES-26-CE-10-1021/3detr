@@ -304,7 +304,7 @@ def do_train(
 
 def test_model(args, model, model_no_ddp, criterion, dataset_config, dataloaders):
     if args.test_ckpt is None or not os.path.isfile(args.test_ckpt):
-        f"Please specify a test checkpoint using --test_ckpt. Found invalid value {args.test_ckpt}"
+        print(f"Please specify a test checkpoint using --test_ckpt. Found invalid value {args.test_ckpt}")
         sys.exit(1)
 
     sd = torch.load(args.test_ckpt, map_location=torch.device("cpu"), weights_only=False)
