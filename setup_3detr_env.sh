@@ -1,42 +1,44 @@
-#!/bin/bash
-set -e
+#!/usr/bin/env bash
+set -eo pipefail
 
 ENV_NAME="3detr"
+export TORCH_CUDA_ARCH_LIST="8.0"
+# https://developer.nvidia.com/cuda-gpus
+# Adjust TORCH_CUDA_ARCH_LIST for your GPU (e.g. 8.6 for RTX 3080, 8.0 for A100)
 
-echo "=== Creating conda environment: $ENV_NAME ==="
-conda create -n $ENV_NAME python=3.6 -y
+echo "=== Creating conda environment: ${ENV_NAME} ==="
+conda create -n "${ENV_NAME}" python=3.10 -y
 
-echo "=== Installing PyTorch 1.9.0 with CUDA 11.1 + pinned MKL ==="
-conda run -n $ENV_NAME conda install \
-    pytorch==1.9.0 torchvision==0.10.0 \
-    cudatoolkit=11.1 \
-    mkl==2021.4.0 \
-    -c pytorch -c conda-forge -y
+source "$(conda info --base)/etc/profile.d/conda.sh"
+conda activate "${ENV_NAME}"
+
+echo "=== Installing PyTorch 2.5.0 with CUDA 12.4 ==="
+conda install pytorch=2.5.0 torchvision=0.20.0 pytorch-cuda=12.4 \
+    -c pytorch -c nvidia -y
 
 echo "=== Installing Python dependencies ==="
-conda run -n $ENV_NAME pip install \
+pip install \
     matplotlib \
-    opencv-python==4.5.5.64 \
+    opencv-python \
     plyfile \
-    "trimesh>=2.35.39,<2.35.40" \
-    "networkx>=2.2,<2.3" \
+    trimesh \
+    networkx \
     scipy \
     tensorboard \
     tensorboardX \
-    open3d
+    open3d \
+    cython \
+    numpy
 
-echo "=== Installing Cython ==="
-conda run -n $ENV_NAME conda install cython -y
-
-echo "=== Building pointnet2 CUDA extensions ==="
+echo "=== Building PointNet++ CUDA extensions ==="
 if [ ! -d "third_party/pointnet2" ]; then
     echo "ERROR: Run this script from the root of the 3detr repo."
     exit 1
 fi
 
-conda run -n $ENV_NAME bash -c "cd third_party/pointnet2 && python setup.py install"
+pip install --no-build-isolation ./third_party/pointnet2
 
 echo "=== Compiling Cython box intersection ==="
-conda run -n $ENV_NAME bash -c "cd utils && python cython_compile.py build_ext --inplace"
+(cd utils && python cython_compile.py build_ext --inplace)
 
-echo "=== Done! Activate with: conda activate $ENV_NAME ==="
+echo "=== Done! Activate with: conda activate ${ENV_NAME} ==="
