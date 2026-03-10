@@ -13,6 +13,6 @@ python main.py \
 --loss_no_object_weight 0.25 \
 --save_separate_checkpoint_every_epoch -1 \
 --checkpoint_dir outputs/scannet_quick_modified \
---ngpus 2 \
+--ngpus 1 \
 --dataset_num_workers 12 \
 --batchsize_per_gpu 8
