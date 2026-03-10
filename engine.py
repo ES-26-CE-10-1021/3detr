@@ -6,7 +6,6 @@ import math
 import time
 import sys
 
-from torch.distributed.distributed_c10d import reduce
 from utils.ap_calculator import APCalculator
 from utils.misc import SmoothedValue
 from utils.dist import (

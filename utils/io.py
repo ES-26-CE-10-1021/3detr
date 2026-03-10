@@ -45,7 +45,7 @@ def resume_if_possible(checkpoint_dir, model_no_ddp, optimizer):
     if not os.path.isfile(last_checkpoint):
         return epoch, best_val_metrics
 
-    sd = torch.load(last_checkpoint, map_location=torch.device("cpu"))
+    sd = torch.load(last_checkpoint, map_location=torch.device("cpu"), weights_only=False)
     epoch = sd["epoch"]
     best_val_metrics = sd["best_val_metrics"]
     print(f"Found checkpoint at {epoch}. Resuming.")

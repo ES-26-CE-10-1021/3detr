@@ -28,7 +28,7 @@ request.urlretrieve(url, local_metrics)
 print(f"Downloaded metrics from {url} to {local_metrics}")
 
 # weights can be simply loaded with pytorch
-weights = torch.load(local_weights, map_location=torch.device("cpu"))
+weights = torch.load(local_weights, map_location=torch.device("cpu"), weights_only=False)
 print("Weights loaded successfully.")
 
 # metrics can be loaded with pickle

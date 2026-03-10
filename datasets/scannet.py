@@ -271,7 +271,7 @@ class ScannetDetectionDataset(Dataset):
         instance_labels = instance_labels[choices]
         semantic_labels = semantic_labels[choices]
 
-        sem_seg_labels = np.ones_like(semantic_labels) * IGNORE_LABEL
+        sem_seg_labels = np.full_like(semantic_labels, IGNORE_LABEL, dtype=np.int64)
 
         for _c in self.dataset_config.nyu40ids_semseg:
             sem_seg_labels[

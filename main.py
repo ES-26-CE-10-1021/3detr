@@ -307,7 +307,7 @@ def test_model(args, model, model_no_ddp, criterion, dataset_config, dataloaders
         f"Please specify a test checkpoint using --test_ckpt. Found invalid value {args.test_ckpt}"
         sys.exit(1)
 
-    sd = torch.load(args.test_ckpt, map_location=torch.device("cpu"))
+    sd = torch.load(args.test_ckpt, map_location=torch.device("cpu"), weights_only=False)
     model_no_ddp.load_state_dict(sd["model"])
     logger = Logger()
     criterion = None  # do not compute loss for speed-up; Comment out to see test loss

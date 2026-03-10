@@ -618,7 +618,7 @@ def generalized_box3d_iou_tensor(
     return gious
 
 
-generalized_box3d_iou_tensor_jit = torch.jit.script(generalized_box3d_iou_tensor)
+generalized_box3d_iou_tensor_jit = generalized_box3d_iou_tensor
 
 
 def generalized_box3d_iou_cython(
