@@ -7,13 +7,15 @@ export TORCH_CUDA_ARCH_LIST="8.0"
 # Adjust TORCH_CUDA_ARCH_LIST for your GPU (e.g. 8.6 for RTX 3080, 8.0 for A100)
 
 echo "=== Creating conda environment: ${ENV_NAME} ==="
-conda create -n "${ENV_NAME}" python=3.10 -y
+conda create -n "${ENV_NAME}" python=3.10 -y #nvidia::cuda=12.4.1 gcc=13.2 gxx=13.2 -y
 
 source "$(conda info --base)/etc/profile.d/conda.sh"
 conda activate "${ENV_NAME}"
 
+#echo "=== Installing PyTorch 2.5.0 with CUDA 12.4 ==="
+
 echo "=== Installing PyTorch 2.5.0 with CUDA 12.4 ==="
-conda install pytorch=2.5.0 torchvision=0.20.0 pytorch-cuda=12.4 \
+conda install pytorch=2.5.0 torchvision=0.20.0 cuda=12.4 \
     -c pytorch -c nvidia -y
 
 echo "=== Installing Python dependencies ==="
