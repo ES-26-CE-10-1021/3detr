@@ -6,12 +6,17 @@ Collected and written by Charles R. Qi
 Last modified: Apr 2021 by Ishan Misra
 """
 import logging
+import os
 import torch
 import numpy as np
 from scipy.spatial import ConvexHull, Delaunay
 from utils.misc import to_list_1d, to_list_3d
 
 _logger = logging.getLogger(__name__)
+
+# Runtime debug switch for expensive GIoU diagnostics.
+# Default OFF for normal training throughput.
+_GIOU_DEBUG = os.environ.get("POINTCEPT_GIOU_DEBUG", "0") == "1"
 
 # Per-event counters used for rate-limited logging.
 _giou_diag_anomaly_count = 0  # GIoU outside [-1, 1] or non-finite
@@ -676,33 +681,35 @@ def generalized_box3d_iou_tensor(
     # ── Physical clamp on 2-D intersection area (both branches) ──────────────
     # inter_area ≤ min(footprint1, footprint2) is a hard geometric constraint.
     # Save raw value first so we can detect and log when the clamp fires.
-    inter_areas_raw = inter_areas.clone()
+    if _GIOU_DEBUG:
+        inter_areas_raw = inter_areas.clone()
 
-    _n_neg_area = (inter_areas_raw < -_eps_fp).sum().item()
-    if _n_neg_area > 0:
-        _logger.warning(
-            "Unexpected negative inter_areas before clamp: %d pairs. %s",
-            _n_neg_area,
-            _fmt_stat(inter_areas_raw, "inter_areas_raw"),
-        )
+        _n_neg_area = (inter_areas_raw < -_eps_fp).sum().item()
+        if _n_neg_area > 0:
+            _logger.warning(
+                "Unexpected negative inter_areas before clamp: %d pairs. %s",
+                _n_neg_area,
+                _fmt_stat(inter_areas_raw, "inter_areas_raw"),
+            )
 
     inter_areas = inter_areas.clamp(min=0.0)
     inter_areas = torch.min(inter_areas, max_inter_areas)
 
-    global _area_clamp_count
-    _n_area_clamped = (inter_areas_raw > max_inter_areas + _eps_fp).sum().item()
-    if _n_area_clamped > 0:
-        _area_clamp_count += 1
-        _ac = _area_clamp_count
-        if _ac == 1 or _ac % 50 == 0:
-            _logger.warning(
-                "Area clamp fired #%d: %d pair(s) had inter_area > min(fp1,fp2). "
-                "%s  |  %s",
-                _ac,
-                _n_area_clamped,
-                _fmt_stat(inter_areas_raw, "inter_areas_raw"),
-                _fmt_stat(inter_areas, "inter_areas_clamped"),
-            )
+    if _GIOU_DEBUG:
+        global _area_clamp_count
+        _n_area_clamped = (inter_areas_raw > max_inter_areas + _eps_fp).sum().item()
+        if _n_area_clamped > 0:
+            _area_clamp_count += 1
+            _ac = _area_clamp_count
+            if _ac == 1 or _ac % 50 == 0:
+                _logger.warning(
+                    "Area clamp fired #%d: %d pair(s) had inter_area > min(fp1,fp2). "
+                    "%s  |  %s",
+                    _ac,
+                    _n_area_clamped,
+                    _fmt_stat(inter_areas_raw, "inter_areas_raw"),
+                    _fmt_stat(inter_areas, "inter_areas_clamped"),
+                )
 
     ### gIOU = iou - (1 - sum_vols/enclose_vol)
     inter_vols = inter_areas * height
@@ -711,34 +718,36 @@ def generalized_box3d_iou_tensor(
     # inter_vol ≤ min(vol1, vol2) is also a hard constraint; clamping inter_area
     # does not guarantee it because height may amplify small area errors.
     vol_cap = torch.min(vols1[:, :, None], vols2[:, None, :])
-    inter_vols_raw = inter_vols.clone()
+    if _GIOU_DEBUG:
+        inter_vols_raw = inter_vols.clone()
 
-    _n_neg_vol = (inter_vols_raw < -_eps_fp).sum().item()
-    if _n_neg_vol > 0:
-        _logger.warning(
-            "Unexpected negative inter_vols before clamp: %d pairs. %s",
-            _n_neg_vol,
-            _fmt_stat(inter_vols_raw, "inter_vols_raw"),
-        )
+        _n_neg_vol = (inter_vols_raw < -_eps_fp).sum().item()
+        if _n_neg_vol > 0:
+            _logger.warning(
+                "Unexpected negative inter_vols before clamp: %d pairs. %s",
+                _n_neg_vol,
+                _fmt_stat(inter_vols_raw, "inter_vols_raw"),
+            )
 
     inter_vols = inter_vols.clamp(min=0.0)
     inter_vols = torch.min(inter_vols, vol_cap)
 
-    global _vol_clamp_count
-    _n_vol_clamped = (inter_vols_raw > vol_cap + _eps_fp).sum().item()
-    if _n_vol_clamped > 0:
-        _vol_clamp_count += 1
-        _vc = _vol_clamp_count
-        if _vc == 1 or _vc % 50 == 0:
-            _logger.warning(
-                "Volume clamp fired #%d: %d pair(s) had inter_vol > min(vol1,vol2). "
-                "%s  |  %s  |  %s",
-                _vc,
-                _n_vol_clamped,
-                _fmt_stat(inter_vols_raw, "inter_vols_raw"),
-                _fmt_stat(inter_vols, "inter_vols_clamped"),
-                _fmt_stat(vol_cap, "vol_cap"),
-            )
+    if _GIOU_DEBUG:
+        global _vol_clamp_count
+        _n_vol_clamped = (inter_vols_raw > vol_cap + _eps_fp).sum().item()
+        if _n_vol_clamped > 0:
+            _vol_clamp_count += 1
+            _vc = _vol_clamp_count
+            if _vc == 1 or _vc % 50 == 0:
+                _logger.warning(
+                    "Volume clamp fired #%d: %d pair(s) had inter_vol > min(vol1,vol2). "
+                    "%s  |  %s  |  %s",
+                    _vc,
+                    _n_vol_clamped,
+                    _fmt_stat(inter_vols_raw, "inter_vols_raw"),
+                    _fmt_stat(inter_vols, "inter_vols_clamped"),
+                    _fmt_stat(vol_cap, "vol_cap"),
+                )
 
     if return_inter_vols_only:
         return inter_vols
@@ -757,33 +766,34 @@ def generalized_box3d_iou_tensor(
     # ── GIoU anomaly diagnostics (rate-limited) ───────────────────────────────
     # Fires independently of the clamp-fire counters above: those catch problems
     # before they reach GIoU; this catches anything that still slips through.
-    global _giou_diag_anomaly_count
-    _n_bad = ((gious > 1.0 + 1e-4) | (gious < -1.0 - 1e-4) | ~gious.isfinite()).sum().item()
-    if _n_bad > 0:
-        _giou_diag_anomaly_count += 1
-        _c = _giou_diag_anomaly_count
-        if _c == 1 or _c % 50 == 0:
-            _logger.warning(
-                "GIoU geometry anomaly #%d (%d bad values out of %d):\n"
-                "  %s\n  %s\n"
-                "  %s\n  %s\n"
-                "  %s\n  %s\n"
-                "  %s\n  %s\n"
-                "  %s",
-                _c,
-                _n_bad,
-                gious.numel(),
-                _fmt_stat(inter_areas_raw, "inter_areas_raw"),
-                _fmt_stat(inter_areas, "inter_areas_clamped"),
-                _fmt_stat(inter_vols_raw, "inter_vols_raw"),
-                _fmt_stat(inter_vols, "inter_vols_clamped"),
-                _fmt_stat(union_vols, "union_vols"),
-                _fmt_stat(enclosing_vols, "enclosing_vols"),
-                _fmt_stat(vols1, "vols1"),
-                _fmt_stat(vols2, "vols2"),
-                _fmt_stat(ious, "ious"),
-                _fmt_stat(gious, "gious"),
-            )
+    if _GIOU_DEBUG:
+        global _giou_diag_anomaly_count
+        _n_bad = ((gious > 1.0 + 1e-4) | (gious < -1.0 - 1e-4) | ~gious.isfinite()).sum().item()
+        if _n_bad > 0:
+            _giou_diag_anomaly_count += 1
+            _c = _giou_diag_anomaly_count
+            if _c == 1 or _c % 50 == 0:
+                _logger.warning(
+                    "GIoU geometry anomaly #%d (%d bad values out of %d):\n"
+                    "  %s\n  %s\n"
+                    "  %s\n  %s\n"
+                    "  %s\n  %s\n"
+                    "  %s\n  %s\n"
+                    "  %s",
+                    _c,
+                    _n_bad,
+                    gious.numel(),
+                    _fmt_stat(inter_areas_raw, "inter_areas_raw"),
+                    _fmt_stat(inter_areas, "inter_areas_clamped"),
+                    _fmt_stat(inter_vols_raw, "inter_vols_raw"),
+                    _fmt_stat(inter_vols, "inter_vols_clamped"),
+                    _fmt_stat(union_vols, "union_vols"),
+                    _fmt_stat(enclosing_vols, "enclosing_vols"),
+                    _fmt_stat(vols1, "vols1"),
+                    _fmt_stat(vols2, "vols2"),
+                    _fmt_stat(ious, "ious"),
+                    _fmt_stat(gious, "gious"),
+                )
 
     return gious
 
@@ -884,14 +894,15 @@ def generalized_box3d_iou_cython(
     inter_areas = inter_areas.to(corners1.device)
 
     # ── Physical clamp on 2-D intersection area ───────────────────────────────
-    inter_areas_raw = inter_areas.clone()
-    _n_neg_area = (inter_areas_raw < -_eps_fp).sum().item()
-    if _n_neg_area > 0:
-        _logger.warning(
-            "[cython] Unexpected negative inter_areas before clamp: %d pairs. %s",
-            _n_neg_area,
-            _fmt_stat(inter_areas_raw, "inter_areas_raw"),
-        )
+    if _GIOU_DEBUG:
+        inter_areas_raw = inter_areas.clone()
+        _n_neg_area = (inter_areas_raw < -_eps_fp).sum().item()
+        if _n_neg_area > 0:
+            _logger.warning(
+                "[cython] Unexpected negative inter_areas before clamp: %d pairs. %s",
+                _n_neg_area,
+                _fmt_stat(inter_areas_raw, "inter_areas_raw"),
+            )
     inter_areas = inter_areas.clamp(min=0.0)
     inter_areas = torch.min(inter_areas, max_inter_areas)
 
@@ -900,14 +911,15 @@ def generalized_box3d_iou_cython(
 
     # ── Physical clamp on 3-D intersection volume ─────────────────────────────
     vol_cap = torch.min(vols1[:, :, None], vols2[:, None, :])
-    inter_vols_raw = inter_vols.clone()
-    _n_neg_vol = (inter_vols_raw < -_eps_fp).sum().item()
-    if _n_neg_vol > 0:
-        _logger.warning(
-            "[cython] Unexpected negative inter_vols before clamp: %d pairs. %s",
-            _n_neg_vol,
-            _fmt_stat(inter_vols_raw, "inter_vols_raw"),
-        )
+    if _GIOU_DEBUG:
+        inter_vols_raw = inter_vols.clone()
+        _n_neg_vol = (inter_vols_raw < -_eps_fp).sum().item()
+        if _n_neg_vol > 0:
+            _logger.warning(
+                "[cython] Unexpected negative inter_vols before clamp: %d pairs. %s",
+                _n_neg_vol,
+                _fmt_stat(inter_vols_raw, "inter_vols_raw"),
+            )
     inter_vols = inter_vols.clamp(min=0.0)
     inter_vols = torch.min(inter_vols, vol_cap)
 
