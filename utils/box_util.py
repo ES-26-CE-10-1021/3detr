@@ -9,7 +9,7 @@ import logging
 import os
 import torch
 import numpy as np
-from scipy.spatial import ConvexHull, Delaunay
+from scipy.spatial import ConvexHull, Delaunay, QhullError
 from utils.misc import to_list_1d, to_list_3d
 
 _logger = logging.getLogger(__name__)
@@ -46,8 +46,21 @@ except ImportError:
 
 
 def in_hull(p, hull):
-    if not isinstance(hull, Delaunay):
-        hull = Delaunay(hull)
+    if isinstance(hull, Delaunay):
+        return hull.find_simplex(p) >= 0
+
+    hull_np = np.asarray(hull)
+    if hull_np.ndim != 2 or hull_np.shape[0] < 4 or hull_np.shape[1] != 3:
+        return np.zeros(p.shape[0], dtype=bool)
+    if not np.isfinite(hull_np).all():
+        return np.zeros(p.shape[0], dtype=bool)
+    if np.any((hull_np.max(axis=0) - hull_np.min(axis=0)) < 1e-6):
+        return np.zeros(p.shape[0], dtype=bool)
+
+    try:
+        hull = Delaunay(hull_np)
+    except QhullError:
+        return np.zeros(p.shape[0], dtype=bool)
     return hull.find_simplex(p) >= 0
 
 
