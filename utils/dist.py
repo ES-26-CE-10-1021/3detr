@@ -125,8 +125,7 @@ def all_gather_pickle(data, device):
 
     # serialized to a Tensor
     buffer = pickle.dumps(data)
-    storage = torch.ByteStorage.from_buffer(buffer)
-    tensor = torch.ByteTensor(storage).to(device)
+    tensor = torch.frombuffer(bytearray(buffer), dtype=torch.uint8).to(device)
 
     # obtain Tensor size of each rank
     local_size = torch.tensor([tensor.numel()], device=device)

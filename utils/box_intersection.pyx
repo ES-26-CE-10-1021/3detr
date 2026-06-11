@@ -11,12 +11,21 @@ FLOAT = np.float32
 @cython.boundscheck(False)
 @cython.wraparound(False)
 def computeIntersection(cp1, cp2, s, e):
-      dc = [ cp1[0] - cp2[0], cp1[1] - cp2[1] ]
-      dp = [ s[0] - e[0], s[1] - e[1] ]
-      n1 = cp1[0] * cp2[1] - cp1[1] * cp2[0]
-      n2 = s[0] * e[1] - s[1] * e[0] 
-      n3 = 1.0 / (dc[0] * dp[1] - dc[1] * dp[0])
-      return [(n1*dp[0] - n2*dc[0]) * n3, (n1*dp[1] - n2*dc[1]) * n3]
+      # Signed-distance parametric form.  When Sutherland-Hodgman calls this,
+      # s and e are on opposite sides of the clip edge, so |denom| = |ds|+|de|
+      # and can never be smaller than either individual distance — no blow-up.
+      cdef float cx = cp2[0] - cp1[0]
+      cdef float cy = cp2[1] - cp1[1]
+      cdef float ds = -cy * (s[0] - cp1[0]) + cx * (s[1] - cp1[1])
+      cdef float de = -cy * (e[0] - cp1[0]) + cx * (e[1] - cp1[1])
+      cdef float denom = ds - de
+      cdef float t
+      if denom < 1e-8 and denom > -1e-8:
+          return [s[0], s[1]]
+      t = ds / denom
+      if t < 0.0: t = 0.0
+      if t > 1.0: t = 1.0
+      return [s[0] + t * (e[0] - s[0]), s[1] + t * (e[1] - s[1])]
 
 @cython.boundscheck(False)
 @cython.wraparound(False)
@@ -92,24 +101,22 @@ cdef inline Py_ssize_t add_point(float[:, :] arr, float[:] point, Py_ssize_t num
 @cython.boundscheck(False)
 @cython.wraparound(False)
 cdef Py_ssize_t computeIntersection_and_add(float[:] cp1, float[:] cp2, float[:] s, float[:] e, float[:, :] arr, Py_ssize_t num_points):
-    #   dc_np = np.zeros(2, dtype=np.float32)
-      cdef float[2] dc
-      dc[0] = cp1[0] - cp2[0]
-      dc[1] = cp1[1] - cp2[1]
-      
-    #   dp_np = np.zeros(2, dtype=np.float32)
-      cdef float[2] dp
-      dp[0] = s[0] - e[0]
-      dp[1] = s[1] - e[1]
-
-      cdef float n1 = cp1[0] * cp2[1] - cp1[1] * cp2[0]
-      cdef float n2 = s[0] * e[1] - s[1] * e[0]
-      cdef float n3 = 1.0 / (dc[0] * dp[1] - dc[1] * dp[0])
-    
-      arr[num_points][0] = (n1*dp[0] - n2*dc[0]) * n3
-      arr[num_points][1] = (n1*dp[1] - n2*dc[1]) * n3
+      cdef float cx = cp2[0] - cp1[0]
+      cdef float cy = cp2[1] - cp1[1]
+      cdef float ds = -cy * (s[0] - cp1[0]) + cx * (s[1] - cp1[1])
+      cdef float de = -cy * (e[0] - cp1[0]) + cx * (e[1] - cp1[1])
+      cdef float denom = ds - de
+      cdef float t
+      if denom < 1e-8 and denom > -1e-8:
+          arr[num_points][0] = s[0]
+          arr[num_points][1] = s[1]
+      else:
+          t = ds / denom
+          if t < 0.0: t = 0.0
+          if t > 1.0: t = 1.0
+          arr[num_points][0] = s[0] + t * (e[0] - s[0])
+          arr[num_points][1] = s[1] + t * (e[1] - s[1])
       num_points = num_points + 1
-
       return num_points
 
 @cython.boundscheck(False)

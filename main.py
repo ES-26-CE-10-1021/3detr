@@ -130,6 +130,7 @@ def make_args_parser():
     ##### Testing #####
     parser.add_argument("--test_only", default=False, action="store_true")
     parser.add_argument("--test_ckpt", default=None, type=str)
+    parser.add_argument("--display_bounding_boxes", default=False, action="store_true")
 
     ##### I/O #####
     parser.add_argument("--checkpoint_dir", default=None, type=str)
@@ -303,10 +304,10 @@ def do_train(
 
 def test_model(args, model, model_no_ddp, criterion, dataset_config, dataloaders):
     if args.test_ckpt is None or not os.path.isfile(args.test_ckpt):
-        f"Please specify a test checkpoint using --test_ckpt. Found invalid value {args.test_ckpt}"
+        print(f"Please specify a test checkpoint using --test_ckpt. Found invalid value {args.test_ckpt}")
         sys.exit(1)
 
-    sd = torch.load(args.test_ckpt, map_location=torch.device("cpu"))
+    sd = torch.load(args.test_ckpt, map_location=torch.device("cpu"), weights_only=False)
     model_no_ddp.load_state_dict(sd["model"])
     logger = Logger()
     criterion = None  # do not compute loss for speed-up; Comment out to see test loss

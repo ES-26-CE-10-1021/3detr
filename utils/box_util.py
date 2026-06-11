@@ -5,10 +5,36 @@
 Collected and written by Charles R. Qi
 Last modified: Apr 2021 by Ishan Misra
 """
+import logging
+import os
 import torch
 import numpy as np
-from scipy.spatial import ConvexHull, Delaunay
+from scipy.spatial import ConvexHull, Delaunay, QhullError
 from utils.misc import to_list_1d, to_list_3d
+
+_logger = logging.getLogger(__name__)
+
+# Runtime debug switch for expensive GIoU diagnostics.
+# Default OFF for normal training throughput.
+_GIOU_DEBUG = os.environ.get("POINTCEPT_GIOU_DEBUG", "0") == "1"
+
+# Per-event counters used for rate-limited logging.
+_giou_diag_anomaly_count = 0  # GIoU outside [-1, 1] or non-finite
+_area_clamp_count = 0          # footprint-area clamp actually fired
+_vol_clamp_count = 0           # inter-volume clamp actually fired
+
+
+def _fmt_stat(t: torch.Tensor, label: str) -> str:
+    """Return a compact min/max/nan/inf summary string for a tensor."""
+    finite = t[t.isfinite()]
+    n_nan = int(t.isnan().sum())
+    n_inf = int(t.isinf().sum())
+    if finite.numel() > 0:
+        return (
+            f"{label}=[{float(finite.min()):.4g}, {float(finite.max()):.4g}]"
+            f" nan={n_nan} inf={n_inf}"
+        )
+    return f"{label}=ALL_NONFINITE nan={n_nan} inf={n_inf}"
 
 try:
     from utils.box_intersection import box_intersection
@@ -20,8 +46,21 @@ except ImportError:
 
 
 def in_hull(p, hull):
-    if not isinstance(hull, Delaunay):
-        hull = Delaunay(hull)
+    if isinstance(hull, Delaunay):
+        return hull.find_simplex(p) >= 0
+
+    hull_np = np.asarray(hull)
+    if hull_np.ndim != 2 or hull_np.shape[0] < 4 or hull_np.shape[1] != 3:
+        return np.zeros(p.shape[0], dtype=bool)
+    if not np.isfinite(hull_np).all():
+        return np.zeros(p.shape[0], dtype=bool)
+    if np.any((hull_np.max(axis=0) - hull_np.min(axis=0)) < 1e-6):
+        return np.zeros(p.shape[0], dtype=bool)
+
+    try:
+        hull = Delaunay(hull_np)
+    except QhullError:
+        return np.zeros(p.shape[0], dtype=bool)
     return hull.find_simplex(p) >= 0
 
 
@@ -387,13 +426,38 @@ def get_3d_box_batch(box_size, angle, center):
 def helper_computeIntersection(
     cp1: torch.Tensor, cp2: torch.Tensor, s: torch.Tensor, e: torch.Tensor
 ):
-    dc = [cp1[0] - cp2[0], cp1[1] - cp2[1]]
-    dp = [s[0] - e[0], s[1] - e[1]]
-    n1 = cp1[0] * cp2[1] - cp1[1] * cp2[0]
-    n2 = s[0] * e[1] - s[1] * e[0]
-    n3 = 1.0 / (dc[0] * dp[1] - dc[1] * dp[0])
-    # return [(n1*dp[0] - n2*dc[0]) * n3, (n1*dp[1] - n2*dc[1]) * n3]
-    return torch.stack([(n1 * dp[0] - n2 * dc[0]) * n3, (n1 * dp[1] - n2 * dc[1]) * n3])
+    """Return the intersection of line (cp1→cp2) with segment (s→e).
+
+    Uses signed-distance parametric interpolation along [s, e] instead of
+    the raw cross-product form  n3 = 1/(dc×dp).  The parametric form is
+    numerically stable because the denominator (ds - de) equals |ds| + |de|
+    whenever Sutherland-Hodgman calls this function (one endpoint inside,
+    one outside), so it can never blow up for a non-degenerate transition.
+
+    The result is clamped to t ∈ [0, 1] so it always lies on segment [s, e],
+    regardless of how nearly parallel the two lines are.  This eliminates the
+    far-away spurious vertex that caused huge Shoelace areas and GIoU >> 1.
+    """
+    # Unnormalized normal of the clip edge: n = (−cy, cx) points left.
+    cx = cp2[0] - cp1[0]
+    cy = cp2[1] - cp1[1]
+
+    # Signed distances of s and e from the clip line (units: m², unnormalized).
+    # Positive means inside the clip half-plane.
+    ds = -cy * (s[0] - cp1[0]) + cx * (s[1] - cp1[1])
+    de = -cy * (e[0] - cp1[0]) + cx * (e[1] - cp1[1])
+
+    # denom = ds − de.  For the normal Sutherland-Hodgman case (one endpoint
+    # inside, one outside), ds and de have opposite signs, so
+    # |denom| = |ds| + |de| ≥ max(|ds|, |de|) — never smaller than either
+    # individual distance.  Only if both points are exactly on the clip
+    # boundary does denom → 0; in that case any point on [s, e] is valid.
+    denom = ds - de
+    if torch.abs(denom) < 1e-8:
+        return s.clone()
+
+    t = (ds / denom).clamp(0.0, 1.0)
+    return torch.stack([s[0] + t * (e[0] - s[0]), s[1] + t * (e[1] - s[1])])
 
 
 def helper_inside(cp1: torch.Tensor, cp2: torch.Tensor, p: torch.Tensor):
@@ -553,8 +617,18 @@ def generalized_box3d_iou_tensor(
     rect1 = rect1[:, :, :, idx2]
     rect2 = rect2[:, :, :, idx2]
 
-    lt = torch.max(rect1[:, :, 1][:, :, None, :], rect2[:, :, 1][:, None, :, :])
-    rb = torch.min(rect1[:, :, 3][:, :, None, :], rect2[:, :, 3][:, None, :, :])
+    # AABB of each rotated footprint (min/max over all 4 vertices).
+    # Using specific vertex indices (1 and 3) only works for axis-aligned boxes;
+    # for arbitrary yaw those vertices are not the AABB extremes and the check
+    # incorrectly returns zero for many overlapping rotated pairs.
+    lt = torch.max(
+        rect1.amin(dim=2)[:, :, None, :],
+        rect2.amin(dim=2)[:, None, :, :],
+    )
+    rb = torch.min(
+        rect1.amax(dim=2)[:, :, None, :],
+        rect2.amax(dim=2)[:, None, :, :],
+    )
     wh = (rb - lt).clamp(min=0)
     non_rot_inter_areas = wh[:, :, :, 0] * wh[:, :, :, 1]
     non_rot_inter_areas = non_rot_inter_areas.view(B, K1, K2)
@@ -573,10 +647,28 @@ def generalized_box3d_iou_tensor(
     # filter malformed boxes
     good_boxes = (enclosing_vols > 2 * EPS) * (sum_vols > 4 * EPS)
 
+    # ── Footprint areas: computed here (on device) so both branches can use them.
+    # rect layout after idx=[3,2,1,0] and idx2=[0,2]:
+    #   vertex 0 = corner3 = (−l/2, +w/2), vertex 1 = corner2 = (−l/2, −w/2)
+    #   vertex 2 = corner1 = (+l/2, −w/2), vertex 3 = corner0 = (+l/2, +w/2)
+    # Adjacent edges have lengths w and l, so footprint = l×w (rotation-invariant).
+    _eps_fp = 1e-8
+    edge01_sq_1 = ((rect1[:, :, 0, :] - rect1[:, :, 1, :]) ** 2).sum(-1)  # (B, K1)
+    edge12_sq_1 = ((rect1[:, :, 1, :] - rect1[:, :, 2, :]) ** 2).sum(-1)
+    footprints1 = torch.sqrt(edge01_sq_1.clamp(min=_eps_fp) * edge12_sq_1.clamp(min=_eps_fp))
+
+    edge01_sq_2 = ((rect2[:, :, 0, :] - rect2[:, :, 1, :]) ** 2).sum(-1)  # (B, K2)
+    edge12_sq_2 = ((rect2[:, :, 1, :] - rect2[:, :, 2, :]) ** 2).sum(-1)
+    footprints2 = torch.sqrt(edge01_sq_2.clamp(min=_eps_fp) * edge12_sq_2.clamp(min=_eps_fp))
+
+    # (B, K1, K2) — upper bound on valid intersection area for each pair
+    max_inter_areas = torch.min(footprints1[:, :, None], footprints2[:, None, :])
+
     if rotated_boxes:
         inter_areas = torch.zeros((B, K1, K2), dtype=torch.float32)
         rect1 = rect1.cpu()
         rect2 = rect2.cpu()
+
         nums_k2_np = to_list_1d(nums_k2)
         non_rot_inter_areas_np = to_list_3d(non_rot_inter_areas)
         for b in range(B):
@@ -586,7 +678,6 @@ def generalized_box3d_iou_tensor(
                         break
                     if non_rot_inter_areas_np[b][k1][k2] == 0:
                         continue
-                    ##### compute volume of intersection
                     inter = polygon_clip_unnest(rect1[b, k1], rect2[b, k2])
                     if len(inter) > 0:
                         xs = torch.stack([x[0] for x in inter])
@@ -596,12 +687,81 @@ def generalized_box3d_iou_tensor(
                             - torch.dot(ys, torch.roll(xs, 1))
                         )
         inter_areas.mul_(0.5)
+        inter_areas = inter_areas.to(corners1.device)
     else:
         inter_areas = non_rot_inter_areas
 
-    inter_areas = inter_areas.to(corners1.device)
+    # ── Physical clamp on 2-D intersection area (both branches) ──────────────
+    # inter_area ≤ min(footprint1, footprint2) is a hard geometric constraint.
+    # Save raw value first so we can detect and log when the clamp fires.
+    if _GIOU_DEBUG:
+        inter_areas_raw = inter_areas.clone()
+
+        _n_neg_area = (inter_areas_raw < -_eps_fp).sum().item()
+        if _n_neg_area > 0:
+            _logger.warning(
+                "Unexpected negative inter_areas before clamp: %d pairs. %s",
+                _n_neg_area,
+                _fmt_stat(inter_areas_raw, "inter_areas_raw"),
+            )
+
+    inter_areas = inter_areas.clamp(min=0.0)
+    inter_areas = torch.min(inter_areas, max_inter_areas)
+
+    if _GIOU_DEBUG:
+        global _area_clamp_count
+        _n_area_clamped = (inter_areas_raw > max_inter_areas + _eps_fp).sum().item()
+        if _n_area_clamped > 0:
+            _area_clamp_count += 1
+            _ac = _area_clamp_count
+            if _ac == 1 or _ac % 50 == 0:
+                _logger.warning(
+                    "Area clamp fired #%d: %d pair(s) had inter_area > min(fp1,fp2). "
+                    "%s  |  %s",
+                    _ac,
+                    _n_area_clamped,
+                    _fmt_stat(inter_areas_raw, "inter_areas_raw"),
+                    _fmt_stat(inter_areas, "inter_areas_clamped"),
+                )
+
     ### gIOU = iou - (1 - sum_vols/enclose_vol)
     inter_vols = inter_areas * height
+
+    # ── Physical clamp on 3-D intersection volume ─────────────────────────────
+    # inter_vol ≤ min(vol1, vol2) is also a hard constraint; clamping inter_area
+    # does not guarantee it because height may amplify small area errors.
+    vol_cap = torch.min(vols1[:, :, None], vols2[:, None, :])
+    if _GIOU_DEBUG:
+        inter_vols_raw = inter_vols.clone()
+
+        _n_neg_vol = (inter_vols_raw < -_eps_fp).sum().item()
+        if _n_neg_vol > 0:
+            _logger.warning(
+                "Unexpected negative inter_vols before clamp: %d pairs. %s",
+                _n_neg_vol,
+                _fmt_stat(inter_vols_raw, "inter_vols_raw"),
+            )
+
+    inter_vols = inter_vols.clamp(min=0.0)
+    inter_vols = torch.min(inter_vols, vol_cap)
+
+    if _GIOU_DEBUG:
+        global _vol_clamp_count
+        _n_vol_clamped = (inter_vols_raw > vol_cap + _eps_fp).sum().item()
+        if _n_vol_clamped > 0:
+            _vol_clamp_count += 1
+            _vc = _vol_clamp_count
+            if _vc == 1 or _vc % 50 == 0:
+                _logger.warning(
+                    "Volume clamp fired #%d: %d pair(s) had inter_vol > min(vol1,vol2). "
+                    "%s  |  %s  |  %s",
+                    _vc,
+                    _n_vol_clamped,
+                    _fmt_stat(inter_vols_raw, "inter_vols_raw"),
+                    _fmt_stat(inter_vols, "inter_vols_clamped"),
+                    _fmt_stat(vol_cap, "vol_cap"),
+                )
+
     if return_inter_vols_only:
         return inter_vols
 
@@ -615,10 +775,43 @@ def generalized_box3d_iou_tensor(
         for b in range(B):
             mask[b, :, : nums_k2[b]] = 1
         gious *= mask
+
+    # ── GIoU anomaly diagnostics (rate-limited) ───────────────────────────────
+    # Fires independently of the clamp-fire counters above: those catch problems
+    # before they reach GIoU; this catches anything that still slips through.
+    if _GIOU_DEBUG:
+        global _giou_diag_anomaly_count
+        _n_bad = ((gious > 1.0 + 1e-4) | (gious < -1.0 - 1e-4) | ~gious.isfinite()).sum().item()
+        if _n_bad > 0:
+            _giou_diag_anomaly_count += 1
+            _c = _giou_diag_anomaly_count
+            if _c == 1 or _c % 50 == 0:
+                _logger.warning(
+                    "GIoU geometry anomaly #%d (%d bad values out of %d):\n"
+                    "  %s\n  %s\n"
+                    "  %s\n  %s\n"
+                    "  %s\n  %s\n"
+                    "  %s\n  %s\n"
+                    "  %s",
+                    _c,
+                    _n_bad,
+                    gious.numel(),
+                    _fmt_stat(inter_areas_raw, "inter_areas_raw"),
+                    _fmt_stat(inter_areas, "inter_areas_clamped"),
+                    _fmt_stat(inter_vols_raw, "inter_vols_raw"),
+                    _fmt_stat(inter_vols, "inter_vols_clamped"),
+                    _fmt_stat(union_vols, "union_vols"),
+                    _fmt_stat(enclosing_vols, "enclosing_vols"),
+                    _fmt_stat(vols1, "vols1"),
+                    _fmt_stat(vols2, "vols2"),
+                    _fmt_stat(ious, "ious"),
+                    _fmt_stat(gious, "gious"),
+                )
+
     return gious
 
 
-generalized_box3d_iou_tensor_jit = torch.jit.script(generalized_box3d_iou_tensor)
+generalized_box3d_iou_tensor_jit = generalized_box3d_iou_tensor
 
 
 def generalized_box3d_iou_cython(
@@ -660,8 +853,14 @@ def generalized_box3d_iou_cython(
     rect1 = rect1[:, :, :, idx2]
     rect2 = rect2[:, :, :, idx2]
 
-    lt = torch.max(rect1[:, :, 1][:, :, None, :], rect2[:, :, 1][:, None, :, :])
-    rb = torch.min(rect1[:, :, 3][:, :, None, :], rect2[:, :, 3][:, None, :, :])
+    lt = torch.max(
+        rect1.amin(dim=2)[:, :, None, :],
+        rect2.amin(dim=2)[:, None, :, :],
+    )
+    rb = torch.min(
+        rect1.amax(dim=2)[:, :, None, :],
+        rect2.amax(dim=2)[:, None, :, :],
+    )
     wh = (rb - lt).clamp(min=0)
     non_rot_inter_areas = wh[:, :, :, 0] * wh[:, :, :, 1]
     non_rot_inter_areas = non_rot_inter_areas.view(B, K1, K2)
@@ -680,6 +879,16 @@ def generalized_box3d_iou_cython(
     # filter malformed boxes
     good_boxes = (enclosing_vols > 2 * EPS) * (sum_vols > 4 * EPS)
 
+    # ── Footprint areas (computed before rect1/rect2 are overwritten as numpy) ─
+    _eps_fp = 1e-8
+    edge01_sq_1 = ((rect1[:, :, 0, :] - rect1[:, :, 1, :]) ** 2).sum(-1)
+    edge12_sq_1 = ((rect1[:, :, 1, :] - rect1[:, :, 2, :]) ** 2).sum(-1)
+    footprints1 = torch.sqrt(edge01_sq_1.clamp(min=_eps_fp) * edge12_sq_1.clamp(min=_eps_fp))
+    edge01_sq_2 = ((rect2[:, :, 0, :] - rect2[:, :, 1, :]) ** 2).sum(-1)
+    edge12_sq_2 = ((rect2[:, :, 1, :] - rect2[:, :, 2, :]) ** 2).sum(-1)
+    footprints2 = torch.sqrt(edge01_sq_2.clamp(min=_eps_fp) * edge12_sq_2.clamp(min=_eps_fp))
+    max_inter_areas = torch.min(footprints1[:, :, None], footprints2[:, None, :])
+
     if rotated_boxes:
         inter_areas = np.zeros((B, K1, K2), dtype=np.float32)
         rect1 = rect1.cpu().numpy().astype(np.float32)
@@ -696,8 +905,37 @@ def generalized_box3d_iou_cython(
         inter_areas = non_rot_inter_areas
 
     inter_areas = inter_areas.to(corners1.device)
+
+    # ── Physical clamp on 2-D intersection area ───────────────────────────────
+    if _GIOU_DEBUG:
+        inter_areas_raw = inter_areas.clone()
+        _n_neg_area = (inter_areas_raw < -_eps_fp).sum().item()
+        if _n_neg_area > 0:
+            _logger.warning(
+                "[cython] Unexpected negative inter_areas before clamp: %d pairs. %s",
+                _n_neg_area,
+                _fmt_stat(inter_areas_raw, "inter_areas_raw"),
+            )
+    inter_areas = inter_areas.clamp(min=0.0)
+    inter_areas = torch.min(inter_areas, max_inter_areas)
+
     ### gIOU = iou - (1 - sum_vols/enclose_vol)
     inter_vols = inter_areas * height
+
+    # ── Physical clamp on 3-D intersection volume ─────────────────────────────
+    vol_cap = torch.min(vols1[:, :, None], vols2[:, None, :])
+    if _GIOU_DEBUG:
+        inter_vols_raw = inter_vols.clone()
+        _n_neg_vol = (inter_vols_raw < -_eps_fp).sum().item()
+        if _n_neg_vol > 0:
+            _logger.warning(
+                "[cython] Unexpected negative inter_vols before clamp: %d pairs. %s",
+                _n_neg_vol,
+                _fmt_stat(inter_vols_raw, "inter_vols_raw"),
+            )
+    inter_vols = inter_vols.clamp(min=0.0)
+    inter_vols = torch.min(inter_vols, vol_cap)
+
     if return_inter_vols_only:
         return inter_vols
 

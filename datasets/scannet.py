@@ -20,8 +20,8 @@ from utils.random_cuboid import RandomCuboid
 
 IGNORE_LABEL = -100
 MEAN_COLOR_RGB = np.array([109.8, 97.2, 83.8])
-DATASET_ROOT_DIR = ""  ## Replace with path to dataset
-DATASET_METADATA_DIR = "" ## Replace with path to dataset
+DATASET_ROOT_DIR = "/home/andreas/3D-Perception/votenet/scannet/scannet_train_detection_data"  ## Replace with path to dataset
+DATASET_METADATA_DIR = "/home/andreas/3D-Perception/votenet/scannet/meta_data" ## Replace with path to dataset
 
 
 class ScannetDatasetConfig(object):
@@ -271,7 +271,7 @@ class ScannetDetectionDataset(Dataset):
         instance_labels = instance_labels[choices]
         semantic_labels = semantic_labels[choices]
 
-        sem_seg_labels = np.ones_like(semantic_labels) * IGNORE_LABEL
+        sem_seg_labels = np.full_like(semantic_labels, IGNORE_LABEL, dtype=np.int64)
 
         for _c in self.dataset_config.nyu40ids_semseg:
             sem_seg_labels[

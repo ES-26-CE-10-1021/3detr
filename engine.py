@@ -6,7 +6,6 @@ import math
 import time
 import sys
 
-from torch.distributed.distributed_c10d import reduce
 from utils.ap_calculator import APCalculator
 from utils.misc import SmoothedValue
 from utils.dist import (
@@ -16,6 +15,7 @@ from utils.dist import (
     reduce_dict,
     barrier,
 )
+from utils.open3d_vis import visualize_predictions_with_open3d
 
 
 def compute_learning_rate(args, curr_epoch_normalized):
@@ -177,6 +177,20 @@ def evaluate(
             "point_cloud_dims_max": batch_data_label["point_cloud_dims_max"],
         }
         outputs = model(inputs)
+
+        if args.test_only and args.display_bounding_boxes and is_primary():
+            displayed_boxes = visualize_predictions_with_open3d(
+                point_clouds=batch_data_label["point_clouds"],
+                predicted_box_corners=outputs["outputs"]["box_corners"],
+                sem_cls_probs=outputs["outputs"]["sem_cls_prob"],
+                objectness_probs=outputs["outputs"]["objectness_prob"],
+                ap_config_dict=ap_calculator.ap_config_dict,
+                sample_idx=0,
+                window_name=f"3DETR Predictions - Batch {curr_iter}",
+            )
+            print(
+                f"Visualized batch {curr_iter} sample 0 with {displayed_boxes} predicted boxes"
+            )
 
         # Compute loss
         loss_str = ""
